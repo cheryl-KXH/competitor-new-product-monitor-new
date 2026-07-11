@@ -8,8 +8,7 @@
   "trackedBrandsPrefix": "*关注品牌包括：",
   "pageFill": {
     "columns": "A:I",
-    "fill": "FFFFFF",
-    "defaultFont": "方正FW筑紫黑简 R"
+    "fill": "FFFFFF"
   },
   "columnWidthRules": {
     "tableRange": "B:H",
@@ -91,8 +90,6 @@
     ]
   },
   "fonts": {
-    "chineseExcelName": "方正FW筑紫黑简 R",
-    "latinExcelName": "方正FW筑紫黑简 R",
     "defaultSize": 10,
     "titleSize": 16,
     "introSize": 12,

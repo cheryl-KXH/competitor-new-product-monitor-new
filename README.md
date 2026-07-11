@@ -118,23 +118,33 @@ export DINGTALK_DOCS_MCP_URL="钉钉文档 MCP Streamable HTTP URL"
 本项目使用以下字体：
 
 - 中文：`方正FW筑紫黑简 R.ttf`
-- 英文/数字：暂时也统一使用中文字体 `方正FW筑紫黑简 R.ttf`
+- 英文/数字：`Heytea Sans Serif Regular.otf`
 
-默认字体路径写在 `config/font_files.json`：
+默认字体配置写在 `config/font_files.json`：
 
-把字体文件放到 `assets/fonts/` 后，在 `config/font_files.json` 中配置相对路径，例如：
+字体来源统一由 `fontDirectory` 和各字体的 `fileName` 决定，不再支持本机绝对路径。把字体文件放到 `assets/fonts/` 后，在 `config/font_files.json` 中配置文件名，例如：
 
 ```json
 {
+  "fontDirectory": "assets/fonts",
+  "defaultFonts": {
+    "chineseExcelName": "Microsoft YaHei",
+    "latinExcelName": "Arial",
+    "cssFamily": "Microsoft YaHei, Arial, sans-serif"
+  },
   "chineseFont": {
-    "projectPath": "assets/fonts/方正FW筑紫黑简 R.ttf"
+    "excelName": "方正FW筑紫黑简 R",
+    "defaultExcelName": "Microsoft YaHei",
+    "fileName": "方正FW筑紫黑简 R.ttf"
   },
   "latinFont": {
-    "projectPath": "assets/fonts/方正FW筑紫黑简 R.ttf"
+    "excelName": "Heytea Sans Serif Regular",
+    "defaultExcelName": "Arial",
+    "fileName": "Heytea Sans Serif Regular.otf"
   }
 }
 ```
-也可以把字体文件放到 `assets/fonts/`，再把 `projectPath` 改成实际文件名。字体是内部独家字体，不提交、不上传外部。Excel 文件只记录字体名称，不会嵌入字体文件，打开 Excel 的电脑也需要安装对应字体。现阶段生成脚本统一使用中文字体，避免英文字体在 Excel 中不生效时回退到宋体。
+字体是内部独家字体，不提交、不上传外部；`.gitignore` 已忽略 `assets/fonts/` 下的字体文件。Excel 文件只记录字体名称，不会嵌入字体文件，打开 Excel 的电脑也需要安装对应字体。如果字体文件缺失，脚本会使用 `defaultFonts` 或 `defaultExcelName`，不会阻断生成。
 
 ## CLI 命令
 

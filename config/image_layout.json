@@ -14,7 +14,6 @@
     "marginBottomPx": 8
   },
   "fonts": {
-    "family": "ReportFont, 方正FW筑紫黑简 R, Arial, sans-serif",
     "chineseFontFileKey": "chineseFont",
     "latinFontFileKey": "latinFont",
     "defaultSizePx": 12,

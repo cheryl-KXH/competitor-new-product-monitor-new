@@ -87,6 +87,31 @@ def load_configs() -> dict[str, dict[str, Any]]:
     return configs
 
 
+def configured_font_path(configs: dict[str, dict[str, Any]], font_key: str) -> Path | None:
+    font_files = configs.get("font_files", {})
+    font_cfg = font_files.get(font_key, {})
+    file_name = str(font_cfg.get("fileName") or "").strip()
+    if not file_name or Path(file_name).name != file_name:
+        return None
+    font_dir_value = Path(str(font_files.get("fontDirectory") or "assets/fonts"))
+    if font_dir_value.is_absolute():
+        return None
+    font_dir = ROOT / font_dir_value
+    path = font_dir / file_name
+    return path if path.exists() else None
+
+
+def configured_excel_font_name(configs: dict[str, dict[str, Any]], font_key: str) -> str:
+    font_files = configs.get("font_files", {})
+    font_cfg = font_files.get(font_key, {})
+    default_fonts = font_files.get("defaultFonts", {})
+    default_key = "latinExcelName" if font_key == "latinFont" else "chineseExcelName"
+    default_name = font_cfg.get("defaultExcelName") or default_fonts.get(default_key) or "Arial"
+    if configured_font_path(configs, font_key):
+        return str(font_cfg.get("excelName") or default_name)
+    return str(default_name)
+
+
 def validate_config(configs: dict[str, dict[str, Any]]) -> list[str]:
     warnings: list[str] = []
     dingtalk = configs["dingtalk"]
@@ -134,9 +159,10 @@ def validate_config(configs: dict[str, dict[str, Any]]) -> list[str]:
     font_files = configs["font_files"]
     for font_key in ("chineseFont", "latinFont"):
         font_cfg = font_files.get(font_key, {})
-        candidates = [font_cfg.get("sourcePath"), ROOT / str(font_cfg.get("projectPath", ""))]
-        if not any(candidate and Path(candidate).exists() for candidate in candidates):
-            warnings.append(f"font_files.json 中 {font_key} 的字体文件当前不可访问；Excel 仍会写入字体名称")
+        if not configured_font_path(configs, font_key):
+            fallback = configured_excel_font_name(configs, font_key)
+            file_name = font_cfg.get("fileName") or "未配置"
+            warnings.append(f"font_files.json 中 {font_key} 的字体文件不可访问：{file_name}；将使用默认字体 {fallback}")
     return warnings
 
 
@@ -158,8 +184,9 @@ def explain_config(configs: dict[str, dict[str, Any]]) -> str:
         f"- 品类规则：{' > '.join(rules.get('categoryRule', {}).get('priority', []))} > 主品类",
         f"- 备注规则：{'，'.join(rules.get('remarkRule', {}).get('order', []))}",
         f"- 图片高度：{layout.get('image', {}).get('heightCm')}cm",
-        f"- 中文字体：{font_files.get('chineseFont', {}).get('excelName')}",
-        f"- 英文字体：{font_files.get('latinFont', {}).get('excelName')}",
+        f"- 字体目录：{font_files.get('fontDirectory', 'assets/fonts')}",
+        f"- 中文字体：{configured_excel_font_name(configs, 'chineseFont')}",
+        f"- 英文字体：{configured_excel_font_name(configs, 'latinFont')}",
         "- 标准字段：",
     ]
     for key, cfg in fields.items():
@@ -1209,7 +1236,7 @@ def is_inside_parentheses(text: str, index: int) -> bool:
 def format_price_for_output(text: str, configs: dict[str, dict[str, Any]], wrap_after_slash: bool = False) -> CellRichText | str:
     rules = configs["report_rules"].get("priceRule", {})
     layout = configs["excel_layout"]
-    font_name = layout.get("fonts", {}).get("chineseExcelName")
+    font_name = configured_excel_font_name(configs, "chineseFont")
     size = layout.get("fonts", {}).get("defaultSize", 10)
     threshold = layout.get("_computedPriceWrapThresholdChars", layout.get("summary", {}).get("priceWrapThresholdChars", 19))
     value = price_with_slash_wrap(text, threshold) if wrap_after_slash else clean_price_text(text)
@@ -1220,7 +1247,7 @@ def format_price_for_output(text: str, configs: dict[str, dict[str, Any]], wrap_
 
 def set_cell_price(cell, text: str, configs: dict[str, dict[str, Any]], wrap_after_slash: bool = False) -> None:
     layout = configs["excel_layout"]
-    font_name = layout.get("fonts", {}).get("chineseExcelName")
+    font_name = configured_excel_font_name(configs, "chineseFont")
     size = layout.get("fonts", {}).get("defaultSize", 10)
     cell.font = Font(name=font_name, size=size, color="000000")
     cell.value = format_price_for_output(text, configs, wrap_after_slash)
@@ -1458,16 +1485,16 @@ def add_image(
         print(f"WARNING: 图片插入失败：{image_path} {exc}", file=sys.stderr)
 
 
-def apply_page_fill_and_fonts(ws, layout: dict[str, Any], max_row: int) -> None:
+def apply_page_fill_and_fonts(ws, configs: dict[str, dict[str, Any]], layout: dict[str, Any], max_row: int) -> None:
     page_fill = layout.get("pageFill", {})
     col_range = page_fill.get("columns", "A:I")
     start_col, end_col = col_range.split(":")
     start_idx = column_index_from_string(start_col)
     end_idx = column_index_from_string(end_col)
     fill_color = page_fill.get("fill", "FFFFFF")
-    default_font = page_fill.get("defaultFont") or layout["fonts"]["chineseExcelName"]
+    default_font = configured_excel_font_name(configs, "chineseFont")
     default_size = layout["fonts"].get("defaultSize", 10)
-    default_names = {None, "Calibri", "宋体", "SimSun", "Arial"}
+    default_names = {None, "Calibri", "宋体", "SimSun"}
     for row in range(1, max_row + 1):
         for col in range(start_idx, end_idx + 1):
             cell = ws.cell(row, col)
@@ -1492,8 +1519,8 @@ def build_workbook(
     colors = layout["colors"]
     fonts = layout["fonts"]
     heights = layout.get("rowHeightsPt", layout.get("rowHeights", {}))
-    chinese_font = fonts["chineseExcelName"]
-    latin_font = chinese_font
+    chinese_font = configured_excel_font_name(configs, "chineseFont")
+    latin_font = configured_excel_font_name(configs, "latinFont")
     thin = Side(style="thin", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
@@ -1650,7 +1677,7 @@ def build_workbook(
                         ws.row_dimensions[detail_row].height = estimate_detail_row_height(key, text, value_width, layout)
                     detail_row += 1
 
-        apply_page_fill_and_fonts(ws, layout, max(detail_row, ws.max_row))
+        apply_page_fill_and_fonts(ws, configs, layout, max(detail_row, ws.max_row))
         output_path.parent.mkdir(parents=True, exist_ok=True)
         wb.save(output_path)
     finally:

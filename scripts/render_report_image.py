@@ -43,12 +43,31 @@ def image_to_data_uri(path: Path) -> str:
 
 
 def configured_font_path(configs: dict[str, dict[str, Any]], font_key: str) -> Path | None:
+    font_files = configs.get("font_files", {})
     font_cfg = configs.get("font_files", {}).get(font_key, {})
-    candidates = [font_cfg.get("sourcePath"), ROOT / str(font_cfg.get("projectPath", ""))]
-    for candidate in candidates:
-        if candidate and Path(candidate).exists():
-            return Path(candidate)
-    return None
+    file_name = str(font_cfg.get("fileName") or "").strip()
+    if not file_name or Path(file_name).name != file_name:
+        return None
+    font_dir_value = Path(str(font_files.get("fontDirectory") or "assets/fonts"))
+    if font_dir_value.is_absolute():
+        return None
+    path = ROOT / font_dir_value / file_name
+    return path if path.exists() else None
+
+
+def html_font_family(configs: dict[str, dict[str, Any]], image_layout: dict[str, Any]) -> str:
+    fonts = image_layout.get("fonts", {})
+    font_files = configs.get("font_files", {})
+    default_family = (
+        font_files.get("defaultFonts", {}).get("cssFamily")
+        or fonts.get("fallbackFamily")
+        or "Microsoft YaHei, Arial, sans-serif"
+    )
+    chinese_key = fonts.get("chineseFontFileKey", "chineseFont")
+    latin_key = fonts.get("latinFontFileKey", "latinFont")
+    if configured_font_path(configs, chinese_key) or configured_font_path(configs, latin_key):
+        return f"ReportFont, {default_family}"
+    return str(default_family)
 
 
 def font_data_uri(path: Path) -> str:
@@ -472,6 +491,7 @@ def build_html_document(
         for count, height in row_heights.items()
     )
     font_css = font_face_css(configs, image_layout)
+    font_family = html_font_family(configs, image_layout)
     logo_cfg = image_layout.get("logo", {})
     logo_uri = image_to_data_uri(ROOT / logo_cfg.get("path", ""))
     intro = configs["excel_layout"].get("introText", "")
@@ -493,7 +513,7 @@ body {{
   width: {page_width}px;
   padding: 0;
   color: #{colors['black']};
-  font-family: {fonts['family']};
+  font-family: {font_family};
   font-size: {fonts['defaultSizePx']}px;
   line-height: 1.35;
 }}
