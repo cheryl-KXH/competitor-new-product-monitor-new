@@ -4,9 +4,12 @@ from __future__ import annotations
 import argparse
 import re
 import shutil
+import sys
+import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import Callable
 
 import generate_weekly_report as excel_report
 from render_report_image import load_image_layout, render_report_outputs
@@ -14,6 +17,10 @@ from render_report_image import load_image_layout, render_report_outputs
 
 ROOT = Path(__file__).resolve().parents[1]
 VALID_OUTPUT_MODES = {"all", "excel", "html", "image"}
+
+
+def log_duration(label: str, started_at: float) -> None:
+    print(f"耗时：{label} {time.perf_counter() - started_at:.1f}s", file=sys.stderr)
 
 
 @dataclass
@@ -112,14 +119,19 @@ def generate_weekly_outputs(
     overwrite: bool = False,
     configs: dict | None = None,
     image_layout: dict | None = None,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> WeeklyOutputResult:
     if output_mode not in VALID_OUTPUT_MODES:
         raise ValueError(f"输出模式不支持：{output_mode}")
 
+    total_started_at = time.perf_counter()
     configs = configs or excel_report.load_configs()
     image_layout = image_layout or load_image_layout()
     brands = brands or []
 
+    stage_started_at = time.perf_counter()
+    if progress_callback:
+        progress_callback("1/5 正在读取并整理钉钉表数据")
     table_fields = excel_report.fetch_table_fields(configs)
     field_ids = excel_report.resolve_field_ids(configs["field_mapping"], table_fields)
     default_brand_order = excel_report.default_brand_option_order(configs, field_ids) if not brands else []
@@ -131,6 +143,7 @@ def generate_weekly_outputs(
         brands = excel_report.effective_output_brands(records, default_brand_order)
     tracked_brands = excel_report.fetch_tracked_brands(configs, business) if business else brands
     data_quality_report = excel_report.collect_data_quality_report(records, configs["report_rules"])
+    log_duration("读取并整理钉钉表数据", stage_started_at)
 
     output_root = resolve_output_root(str(output_dir) if output_dir else None, image_layout)
     report_stem_value = stem or report_stem(start, end)
@@ -143,35 +156,56 @@ def generate_weekly_outputs(
     file_stem = report_dir.name
 
     output_paths: list[Path] = []
-    if output_mode in {"all", "excel"}:
-        xlsx_path = report_dir / f"{file_stem}.xlsx"
-        excel_report.build_workbook(records, configs, start, end, brands, tracked_brands, xlsx_path, data_quality_report)
-        excel_report.cleanup_legacy_image_cache(report_dir)
-        output_paths.append(xlsx_path)
+    image_cache = excel_report.ImageCache()
+    try:
+        stage_started_at = time.perf_counter()
+        if progress_callback:
+            progress_callback("2/5 正在预下载产品图片")
+        configured_workers = int(image_layout.get("render", {}).get("imageDownloadWorkers", 1))
+        image_cache.prefetch(records, max_workers=configured_workers)
+        log_duration("预下载产品图片", stage_started_at)
 
-    html_path = report_dir / f"{file_stem}.html" if output_mode in {"all", "html"} else None
-    png_path = report_dir / f"{file_stem}.png" if output_mode in {"all", "image"} else None
-    if html_path or png_path:
-        render_report_outputs(
-            records,
-            configs,
-            image_layout,
-            start,
-            end,
-            brands,
-            tracked_brands,
-            html_path,
-            png_path,
-            data_quality_report,
-        )
-        if html_path:
-            output_paths.append(html_path)
-        if png_path:
-            output_paths.append(png_path)
+        if output_mode in {"all", "excel"}:
+            stage_started_at = time.perf_counter()
+            if progress_callback:
+                progress_callback("3/5 正在生成 Excel")
+            xlsx_path = report_dir / f"{file_stem}.xlsx"
+            excel_report.build_workbook(records, configs, start, end, brands, tracked_brands, xlsx_path, data_quality_report, image_cache)
+            excel_report.cleanup_legacy_image_cache(report_dir)
+            output_paths.append(xlsx_path)
+            log_duration("生成 Excel", stage_started_at)
+
+        html_path = report_dir / f"{file_stem}.html" if output_mode in {"all", "html"} else None
+        png_path = report_dir / f"{file_stem}.png" if output_mode in {"all", "image"} else None
+        if html_path or png_path:
+            stage_started_at = time.perf_counter()
+            if progress_callback:
+                progress_callback("4/5 正在生成 HTML/PNG")
+            render_report_outputs(
+                records,
+                configs,
+                image_layout,
+                start,
+                end,
+                brands,
+                tracked_brands,
+                html_path,
+                png_path,
+                data_quality_report,
+                image_cache,
+            )
+            if html_path:
+                output_paths.append(html_path)
+            if png_path:
+                output_paths.append(png_path)
+            log_duration("生成 HTML/PNG", stage_started_at)
+    finally:
+        image_cache.cleanup()
 
     dedupe_quality_warnings(data_quality_report)
     excel_report.print_data_quality_warnings(data_quality_report)
     data_quality_warnings = excel_report.data_quality_warning_lines(data_quality_report)
+    log_duration("总生成流程", total_started_at)
     return WeeklyOutputResult(
         report_dir=report_dir,
         output_paths=output_paths,

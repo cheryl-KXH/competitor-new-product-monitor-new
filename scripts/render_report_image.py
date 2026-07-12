@@ -16,7 +16,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from generate_weekly_report import DataQualityReport, ReportRecord, clean_price_text, format_title_date, quality_record_label
+from generate_weekly_report import DataQualityReport, ImageCache, ReportRecord, clean_price_text, format_title_date, quality_record_label
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,12 +118,17 @@ def font_face_css(configs: dict[str, dict[str, Any]], image_layout: dict[str, An
     return "\n".join(css)
 
 
-def fetch_image_data_uri(url: str, record: ReportRecord, data_quality_report: DataQualityReport) -> str:
+def fetch_image_data_uri(url: str, record: ReportRecord, data_quality_report: DataQualityReport, image_cache: ImageCache | None = None) -> str:
     if not url:
         return ""
+    if image_cache:
+        data_uri = image_cache.data_uri(url, record.record_id)
+        if not data_uri:
+            data_quality_report.image_download_failures.append(f"{quality_record_label(record)}：产品外观图片下载失败")
+        return data_uri
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             content_type = resp.headers.get("Content-Type", "image/png").split(";")[0].strip() or "image/png"
             data = base64.b64encode(resp.read()).decode("ascii")
         return f"data:{content_type};base64,{data}"
@@ -184,7 +189,8 @@ PRICE_SOFT_BREAK = "\ue000"
 
 
 def insert_price_soft_breaks(text: str) -> str:
-    return re.sub(r"(?<=[)）])(?=[(（])", PRICE_SOFT_BREAK, text)
+    pieces = [piece for piece in re.split(r"(?=[(（])|(?<=[)）])", text) if piece]
+    return PRICE_SOFT_BREAK.join(pieces)
 
 
 def split_outside_parentheses(text: str, separator: str = "/") -> list[str]:
@@ -261,7 +267,7 @@ def safe_price_width_segments(text: str) -> list[str]:
         return price_blocks(value)
     segments: list[str] = []
     for block in price_blocks(value):
-        pieces = re.split(r"(?<=[)）])(?=[(（])", block)
+        pieces = re.split(r"(?=[(（])|(?<=[)）])", block)
         segments.extend(piece.strip() for piece in pieces if piece.strip())
     return segments or [value]
 
@@ -279,6 +285,26 @@ def estimate_wrapped_lines(text: str, width_px: int, font_size_px: int, explicit
     lines = 0
     for part in parts:
         lines += max(1, int((visual_len(part) + capacity - 0.01) // capacity))
+    return max(1, lines)
+
+
+def estimate_price_lines(text: str, width_px: int, font_size_px: int) -> int:
+    if "/" in clean_price_text(text):
+        return max(
+            len(price_blocks(text)),
+            estimate_wrapped_lines(max(safe_price_width_segments(text), key=visual_len, default=""), width_px, font_size_px),
+        )
+
+    capacity = max(1.0, (width_px - 8) / max(1, font_size_px))
+    lines = 1
+    current = ""
+    for piece in safe_price_width_segments(text):
+        candidate = f"{current}{piece}" if current else piece
+        if current and visual_len(candidate) > capacity:
+            lines += 1
+            current = piece
+        else:
+            current = candidate
     return max(1, lines)
 
 
@@ -307,8 +333,8 @@ def compute_summary_column_widths(records: list[ReportRecord], layout: dict[str,
     price_min, price_max = min_max.get("price", [72, 104])
     remark_min, remark_max = min_max.get("remark", [72, 140])
 
-    longest_price = max((block for record in records for block in safe_price_width_segments(record.price)), key=visual_len, default="")
-    price_need = text_width_px(longest_price, font_size, int(padding.get("price", 18)))
+    longest_price_segment = max((block for record in records for block in safe_price_width_segments(record.price)), key=visual_len, default="")
+    price_need = text_width_px(longest_price_segment, font_size, int(padding.get("price", 18)))
     longest_remark = max((record.remark for record in records), key=visual_len, default="")
     remark_padding = int(padding.get("remark", 16))
     remark_need = text_width_px(longest_remark, font_size, remark_padding)
@@ -323,12 +349,7 @@ def compute_summary_column_widths(records: list[ReportRecord], layout: dict[str,
     target_width = table_width
     if hard_width > target_width:
         shortage = hard_width - target_width
-        reducible_remark = max(0, remark_width - int(remark_min))
-        take = min(shortage, reducible_remark)
-        remark_width -= take
-        shortage -= take
-        if shortage:
-            target_width += shortage
+        target_width += shortage
         extra = 0
     else:
         extra = target_width - hard_width
@@ -353,14 +374,10 @@ def compute_summary_column_widths(records: list[ReportRecord], layout: dict[str,
 
 def summary_line_count(record: ReportRecord, columns: dict[str, int], layout: dict[str, Any]) -> int:
     font_size = int(layout.get("fonts", {}).get("defaultSizePx", 12))
-    price_lines = max(
-        len(price_blocks(record.price)),
-        estimate_wrapped_lines(max(safe_price_width_segments(record.price), key=visual_len, default=""), columns["price"], font_size),
-    )
     return max(
         1,
         estimate_wrapped_lines(record.category, columns["category"], font_size),
-        price_lines,
+        estimate_price_lines(record.price, columns["price"], font_size),
         estimate_wrapped_lines(record.remark, columns["remark"], font_size),
     )
 
@@ -430,6 +447,7 @@ def build_detail_html(
     layout: dict[str, Any],
     data_quality_report: DataQualityReport,
     table_width: int | None = None,
+    image_cache: ImageCache | None = None,
 ) -> str:
     grouped = grouped_records(records, brands)
     summary_columns = compute_summary_column_widths(records, layout)
@@ -443,7 +461,7 @@ def build_detail_html(
             f'<tr><th class="brand-header" colspan="2">{escape_text(brand)}本周新品数量： {len(brand_records)}个</th></tr>'
         )
         for record in brand_records:
-            image_uri = fetch_image_data_uri(record.image_urls[0], record, data_quality_report) if record.image_urls else ""
+            image_uri = fetch_image_data_uri(record.image_urls[0], record, data_quality_report, image_cache) if record.image_urls else ""
             image_html = (
                 f'<img class="product-image" src="{image_uri}" alt="{escape_text(record.product_name)}">'
                 if image_uri
@@ -472,6 +490,7 @@ def build_html_document(
     brands: list[str],
     tracked_brands: list[str],
     data_quality_report: DataQualityReport,
+    image_cache: ImageCache | None = None,
 ) -> str:
     page = image_layout["page"]
     fonts = image_layout["fonts"]
@@ -498,7 +517,7 @@ def build_html_document(
     tracked_prefix = configs["excel_layout"].get("trackedBrandsPrefix", "*关注品牌包括：")
     tracked_html = render_tracked_html(tracked_brands, tracked_prefix)
     summary_html = build_summary_html(records, brands, image_layout)
-    detail_html = build_detail_html(records, brands, image_layout, data_quality_report, detail_table_width)
+    detail_html = build_detail_html(records, brands, image_layout, data_quality_report, detail_table_width, image_cache)
     css = f"""
 {font_css}
 * {{ box-sizing: border-box; }}
@@ -592,7 +611,7 @@ async def screenshot_html_with_playwright(html_path: Path, png_path: Path, image
             headless=True,
         )
         page = await browser.new_page(viewport={"width": width, "height": 900}, device_scale_factor=scale)
-        await page.goto(html_path.resolve().as_uri(), wait_until="networkidle")
+        await page.goto(html_path.resolve().as_uri(), wait_until="load")
         await page.evaluate("document.fonts && document.fonts.ready")
         await page.wait_for_function(
             "() => Array.from(document.images).every(img => img.complete)",
@@ -666,8 +685,9 @@ def render_report_outputs(
     html_path: Path | None,
     png_path: Path | None,
     data_quality_report: DataQualityReport,
+    image_cache: ImageCache | None = None,
 ) -> None:
-    html_content = build_html_document(records, configs, image_layout, start, end, brands, tracked_brands, data_quality_report)
+    html_content = build_html_document(records, configs, image_layout, start, end, brands, tracked_brands, data_quality_report, image_cache)
     if html_path:
         html_path.parent.mkdir(parents=True, exist_ok=True)
         html_path.write_text(html_content, encoding="utf-8")

@@ -9,7 +9,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = ROOT / "config"
@@ -279,7 +279,7 @@ def upload_file(config: dict[str, Any], folder_id: str, path: Path) -> dict[str,
     request_headers["Content-Type"] = ""
     request_headers["Content-Length"] = str(size)
     request = urllib.request.Request(str(upload_url), data=path.read_bytes(), method="PUT", headers=request_headers)
-    with urllib.request.urlopen(request, timeout=120) as response:
+    with urllib.request.urlopen(request, timeout=300) as response:
         if response.status != 200:
             raise RuntimeError(f"上传文件失败：HTTP {response.status}")
     commit_payload = {
@@ -295,8 +295,19 @@ def upload_file(config: dict[str, Any], folder_id: str, path: Path) -> dict[str,
     return committed if isinstance(committed, dict) else {"result": committed}
 
 
-def upload_report_directory(config: dict[str, Any], business: str, year: int | str, report_stem: str, paths: list[Path]) -> str:
+def upload_report_directory(
+    config: dict[str, Any],
+    business: str,
+    year: int | str,
+    report_stem: str,
+    paths: list[Path],
+    progress_callback: Callable[[str], None] | None = None,
+) -> str:
     folder_id, folder_url = replace_report_folder(config, business, year, report_stem)
+    if progress_callback:
+        progress_callback("5/5 正在上传至钉钉文档")
     for path in paths:
+        started_at = time.perf_counter()
         upload_file(config, folder_id, path)
+        print(f"耗时：上传 {path.name} ({path.stat().st_size / 1024 / 1024:.1f}MB) {time.perf_counter() - started_at:.1f}s", file=sys.stderr)
     return folder_url or f"https://alidocs.dingtalk.com/i/nodes/{folder_id}"

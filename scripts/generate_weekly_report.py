@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import concurrent.futures
+import hashlib
 import json
 import math
 import os
@@ -10,6 +13,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
@@ -69,6 +74,75 @@ class DataQualityReport:
     @property
     def image_issue_count(self) -> int:
         return len(self.missing_images) + len(self.image_download_failures)
+
+
+@dataclass
+class CachedImage:
+    path: Path
+    content_type: str
+
+
+class ImageCache:
+    def __init__(self, timeout_seconds: int = 30, retry_count: int = 3) -> None:
+        self.timeout_seconds = timeout_seconds
+        self.retry_count = retry_count
+        self._manager = tempfile.TemporaryDirectory(prefix="weekly_report_images_")
+        self.root = Path(self._manager.name)
+        self._cache: dict[str, CachedImage] = {}
+        self._lock = threading.Lock()
+
+    def cleanup(self) -> None:
+        self._manager.cleanup()
+
+    def prefetch(self, records: list[ReportRecord], max_workers: int = 1) -> None:
+        jobs: dict[str, tuple[str, str]] = {}
+        for record in records:
+            if record.image_urls:
+                jobs.setdefault(record.image_urls[0], (record.record_id, record.image_urls[0]))
+        if not jobs:
+            return
+        workers = max(1, min(max_workers, 2, len(jobs)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            list(executor.map(lambda item: self.fetch(item[1], item[0], log_failure=False), jobs.values()))
+
+    def fetch(self, url: str, record_id: str, log_failure: bool = True) -> CachedImage | None:
+        if not url:
+            return None
+        with self._lock:
+            if url in self._cache:
+                return self._cache[url]
+
+        clean_id = re.sub(r"[^A-Za-z0-9_-]+", "_", record_id or "image")
+        digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
+        target = self.root / f"{clean_id}_{digest}.img"
+        last_exc: Exception | None = None
+        for attempt in range(1, self.retry_count + 1):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
+                    content_type = resp.headers.get("Content-Type", "image/png").split(";")[0].strip() or "image/png"
+                    target.write_bytes(resp.read())
+                cached = CachedImage(target, content_type)
+                with self._lock:
+                    self._cache[url] = cached
+                return cached
+            except Exception as exc:
+                last_exc = exc
+                if attempt < self.retry_count:
+                    time.sleep(float(attempt))
+
+        if log_failure:
+            print(f"WARNING: 图片下载失败：{record_id} {last_exc}", file=sys.stderr)
+        else:
+            print(f"INFO: 图片预下载未成功，生成时将重试：{record_id} {last_exc}", file=sys.stderr)
+        return None
+
+    def data_uri(self, url: str, record_id: str) -> str:
+        cached = self.fetch(url, record_id)
+        if not cached:
+            return ""
+        data = base64.b64encode(cached.path.read_bytes()).decode("ascii")
+        return f"data:{cached.content_type};base64,{data}"
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -1341,16 +1415,19 @@ def write_across_range(
     cell.alignment = Alignment(horizontal=horizontal, vertical=vertical, wrap_text=wrap_text)
 
 
-def download_image(url: str, record_id: str, cache_dir: Path) -> Path | None:
+def download_image(url: str, record_id: str, cache_dir: Path, image_cache: ImageCache | None = None) -> Path | None:
     if not url:
         return None
+    if image_cache:
+        cached = image_cache.fetch(url, record_id)
+        return cached.path if cached else None
     cache_dir.mkdir(parents=True, exist_ok=True)
     suffix = ".png"
     clean_id = re.sub(r"[^A-Za-z0-9_-]+", "_", record_id or "image")
     target = cache_dir / f"{clean_id}{suffix}"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             target.write_bytes(resp.read())
         return target
     except Exception as exc:
@@ -1513,6 +1590,7 @@ def build_workbook(
     tracked_brands: list[str],
     output_path: Path,
     data_quality_report: DataQualityReport,
+    image_cache: ImageCache | None = None,
 ) -> None:
     layout = configs["excel_layout"]
     rules = configs["report_rules"]
@@ -1601,8 +1679,8 @@ def build_workbook(
     ws.row_dimensions[note_row].height = float(heights.get("trackedBrands", 16.8))
 
     detail_row = note_row + layout["details"]["blankRowsAfterSummary"] + 1
-    image_cache_manager = tempfile.TemporaryDirectory(prefix="weekly_report_images_")
-    image_cache = Path(image_cache_manager.name)
+    image_cache_manager = tempfile.TemporaryDirectory(prefix="weekly_report_images_") if image_cache is None else None
+    image_cache_dir = Path(image_cache_manager.name) if image_cache_manager else Path(tempfile.gettempdir())
     try:
         for brand in displayed_brands:
             brand_records = grouped[brand]
@@ -1661,7 +1739,7 @@ def build_workbook(
                         image_height = cm_to_points(float(layout["image"].get("heightCm", 4.0))) + float(heights.get("imagePadding", 10.0))
                         ws.row_dimensions[detail_row].height = max(float(layout["image"].get("rowHeightPt", 0.0)), image_height)
                         if record.image_urls:
-                            image_path = download_image(record.image_urls[0], record.record_id, image_cache)
+                            image_path = download_image(record.image_urls[0], record.record_id, image_cache_dir, image_cache)
                             if image_path:
                                 add_image(
                                     ws,
@@ -1681,7 +1759,8 @@ def build_workbook(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         wb.save(output_path)
     finally:
-        image_cache_manager.cleanup()
+        if image_cache_manager:
+            image_cache_manager.cleanup()
 
 
 def default_output_path(start: date, end: date, layout: dict[str, Any]) -> Path:

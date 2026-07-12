@@ -172,6 +172,13 @@ def mark_running(configs: dict[str, dict[str, Any]], record_id: str) -> None:
     update_schedule_cells(configs, record_id, cells)
 
 
+def update_feedback(configs: dict[str, dict[str, Any]], record_id: str, message: str) -> None:
+    feedback_field = feedback_field_id(configs)
+    if not feedback_field:
+        return
+    update_schedule_cells(configs, record_id, {feedback_field: message[:5000]})
+
+
 def mark_success(
     configs: dict[str, dict[str, Any]],
     record_id: str,

@@ -32,7 +32,7 @@
   "summary": {
     "tableWidthPx": 588,
     "fixedColumnWidthsPx": {
-      "brand": 78,
+      "brand": 82,
       "count": 54,
       "category": 52,
       "launchDate": 60
@@ -40,7 +40,7 @@
     "flexColumns": ["productName", "price", "remark"],
     "flexColumnMinMaxPx": {
       "productName": [118, 190],
-      "price": [72, 104],
+      "price": [72, 156],
       "remark": [72, 140]
     },
     "textWidthPaddingPx": {
